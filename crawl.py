@@ -5,26 +5,29 @@ import urllib
 import os
 import subprocess
 import threading
-import lynx
+import signal
 import re
 import sys
 import feedparser
 from interruptingcow import timeout
 from urlparse import urlparse
 from readability.readability import Document
+from datetime import date
+
+from Queue import Queue
+import pymongo
+from pymongo import MongoClient
+from bson.objectid import ObjectId
 
 ##############################################
 # TODOS
 # get links from processed pages
-# dynamic index, depends on the number of files in the dir
 # even safer, subdir of date for each run
-# also sort by topic, keep a db for the attributes of the files
-# incorporate mongodb, more POWERFUL control
-# acoid write and read tmp.html for lynx, see if possible to direct pass text
+# combined with logging
+# learn the parameters of lynx, very useful
 
 ##############################################
 # helper
-
 
 _LINK_BRACKETS = re.compile(r"\[\d+]", re.U)
 _LEFT_BRACKETS = re.compile(r"\[", re.U)
@@ -69,158 +72,153 @@ def kill_lynx(pid):
 
 ##############################################
 
-# whole task includes:
-# get news url from google news api (as the only url source, instead of from web page)
-# manage the processed and blacklisted urls, domain name
-# try:
-#   pipeline to get plain text from url
-# except:
-#   blacklist the unresolvable domains
-# store url respectively
-
 class Crawler:
-    def __init__(self, data_dir = 'data'):
-        self.blacklist = set()
-        self.load_seen()
+    def __init__(self, data_dir = 'data', db = 'crawler'):
+        self.connect_db(db)
         self.data_dir = data_dir
+        self.feed_queue = Queue()
+        self.url_queue = Queue()
         if not os.path.exists(data_dir):
             os.makedirs(data_dir)
         self.count = len(os.listdir(data_dir)) + 1
 
-    def load_seen(self):
-        filename = 'processed.txt'
-        self.seen = set()
-        if not os.path.exists(filename):
-            open(filename, 'a').close()
-        for line in open(filename):
-            self.seen.add(line.strip())
-
-    def save_seen(self):
-        f = open('processed.txt', 'a')
-        for url in self.seen:
-            f.write(url + '\n')
-        f.close()
+    def connect_db(self, db):
+        client = MongoClient()
+        self.blacklist = client[db]['blacklist']
+        self.feeds = client[db]['feeds']
+        self.urls = client[db]['urls']
+        self.texts = client[db]['texts']
 
     def ban(self, url):
         site = urlparse(url).netloc
-        self.blacklist.add(site)
+        self.blacklist.insert_one({'site': site})
 
     def is_valid(self, url):
         try:
             site = urlparse(url).netloc
-            return site not in self.blacklist
-        except:
-            return False
-
-    def show_blacklist(self):
-        for site in self.blacklist:
-            print site
-
-    def process(self, feeds_file):
-        source = self.get_source(feeds_file)
-        print source
-        self.crawl(source)
-        self.save_seen()
-
-    # with timeout
-    def get_source(self, feeds_file):
-        print 'getting URLs from feeds'
-        source = []
-        for line in open(feeds_file):
-            url = line.strip()
-            if url:
-                try:
-                    with timeout(3, exception=RuntimeError):
-                        feed = feedparser.parse(url)
-                        if feed.status == 200:
-                            for entry in feed.entries:
-                                link = entry.link
-                                source.append(link)
-                except:
-                    continue
-        return source
-
-
-    def crawl(self, source):
-        """
-        save plain text from url source, which is the output of a feed 
-        """
-        print 'crawling...'
-        for url in source:
-            print url
-            if self.is_valid(url) and url not in self.seen:
-                self.seen.add(url)
-                filename = os.path.join(self.data_dir, '%d.txt' % self.count)
-                flag = self.pipeline(url, filename)
-                if flag == 0:
-                    self.count += 1
-                elif flag == 2:
-                    self.ban(url)
-        # os.remove('tmp.html')
-
-
-
-    def pipeline(self, url, output):
-        """
-        Pipeline to deal with one web page
-        1. get summary of the web page
-        2. get palin text from the html
-        """
-        min_length = 500
-        max_length = 50000
-
-        try:
-            with timeout(3, exception=RuntimeError):
-                success = self.write_summary_html(url, 'tmp.html')
-                if success:
-                    text = self.get_plain_text('tmp.html')
-                    if min_length < len(text) < max_length:
-                        f = open(output, 'w')
-                        f.write(text.encode('utf-8'))
-                        f.close()
-                        return 0 # success
-                    else:
-                        return 1 # text too short or too long
-                return 2 # cannot get summary
-        except:
-            return 2
-
-
-    def write_summary_html(self, url, output):
-        """
-        Step 1: write summary of the web page to a tmp html
-        TODO: get rid of the annoying error message
-        """
-        # print 'readability'
-        try:
-            html = urllib.urlopen(url).read()
-            article = Document(html).summary()
-            article = sub_ms_chars(article)
-            f = open(output, 'w')
-            f.write(article.encode('utf-8'))
-            f.close()
+            if self.blacklist.find_one({'site': site}):
+                return False
+            if self.urls.find_one({'url': url}):
+                return False
             return True
         except:
             return False
 
-    def get_plain_text(self, url):
-        """
-        Step 2: get plain text from lynx
-        timeout in 3 sec
-        """
-        # print 'lynx'
-        data = ""
-        cmd = "lynx -dump -nolist -notitle \"{0}\"".format(url)
-        lynx = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE)
-        t = threading.Timer(3, kill_lynx, args=[lynx.pid])
-        t.start()
-        data = lynx.stdout.read()
-        t.cancel()
-        data = data.decode("utf-8", 'ignore')
-        return clean_lynx(data)
 
+    def read_feeds(self, feeds_file):
+        """
+        read the initial feeds from the file
+        put them into the feed_queue
+        for robustness, retrieve feed from db again
+        """
+        for line in open(feeds_file):
+            feed = line.strip()
+            if feed and not self.feeds.find_one({'feed': feed}):
+                self.feeds.insert_one({'feed': feed, 'success': 0, 'fail': 0})
+
+
+
+    def process_queue(self):
+        """
+        get urls of the feeds from feed_queue, put into url_queue
+        process the urls from url_queue, add new urls and feads into corresponding queue
+        update the success and fail count of the feed
+        """
+        for entry in self.feeds.find():
+            self.feed_queue.put(entry['feed'])
+        while not self.feed_queue.empty():
+            feed = self.feed_queue.get()
+            print feed
+            urls = self.get_urls_and_titles(feed)            
+            if urls:
+                self.feeds.update({'feed': feed}, {'$inc': {'success': 1}})
+                for (url, title) in urls:
+                    self.url_queue.put((url, title))
+
+                while not self.url_queue.empty():
+                    url, title = self.url_queue.get()
+                    print url
+                    if self.is_valid(url):
+                        filename = '%d.txt' % self.count
+                        path = os.path.join(self.data_dir, filename)
+                        flag, new_feeds, new_urls = self.get_plain_text(url, path)
+                        if flag == 0:
+                            self.urls.insert_one({'url': url, 'success': True})
+                            self.texts.insert_one({'file': filename,\
+                                                   'title': title,\
+                                                   'url': url,\
+                                                   'feed': feed,\
+                                                   'date': str(date.today())})
+                            self.count += 1
+                            for new_feed in new_feeds:
+                                self.feed_queue.put(new_feed)
+                            for new_url in new_urls:
+                                self.url_queue.put(new_url)
+
+                        else:
+                            self.urls.insert_one({'url': url, 'success': False})
+                            self.ban(url)
+
+            else:
+                self.feeds.update({'feed': feed}, {'$inc': {'fail': 1}})
+
+
+    def get_urls_and_titles(self, feed):
+        urls = []
+        try:
+            with timeout(3, exception=RuntimeError):
+                feed = feedparser.parse(feed)
+                if feed.status == 200:
+                    for entry in feed.entries:
+                        # TODO: check if all RSS have .link, or something else 
+                        link = entry.link
+                        title = entry.title
+                        urls.append((link, title))
+        except:
+            pass
+        return urls
+
+    def find_feed(self, url):
+        return None
+
+    def find_url(self, url):
+        return None    
+
+
+    def get_plain_text(self, url, output):
+        """
+        get plain text from a given url by stacking two tools:
+        1. get summary of the web page using readability
+        2. get plain text from the html using lynx
+        """
+        min_length = 500
+        max_length = 50000        
+        try:
+            with timeout(4, exception=RuntimeError):
+                html = urllib.urlopen(url).read()
+                article = Document(html).summary()
+                article = sub_ms_chars(article)
+                cmd = "lynx -dump -nolist -notitle -stdin"
+                lynx = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stdin=subprocess.PIPE)
+                t = threading.Timer(2, kill_lynx, args=[lynx.pid])
+                t.start()            
+                text = lynx.communicate(input=article.encode('utf-8'))[0]
+                t.cancel()
+                if min_length < len(text) < max_length:
+                    f = open(output, 'w')
+                    f.write(text)
+                    f.close()
+                    return 0, [], [] # success
+                else:
+                    return 1, [], [] # text too short or too long
+        except:
+            return 2, [], []
+
+ 
 
 ##############################################
 if __name__ == '__main__':
     crawler = Crawler()
-    crawler.process('feeds.txt')
+    crawler.read_feeds('feeds.txt')
+    crawler.process_queue()
+
