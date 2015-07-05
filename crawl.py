@@ -6,6 +6,7 @@ import os
 import subprocess
 import threading
 import signal
+import time
 import re
 import sys
 import feedparser
@@ -14,17 +15,17 @@ from urlparse import urlparse
 from readability.readability import Document
 from datetime import date
 
+import bson
+
 from Queue import Queue
-import pymongo
 from pymongo import MongoClient
-from bson.objectid import ObjectId
 
 ##############################################
 # TODOS
-# get links from processed pages
-# even safer, subdir of date for each run
-# combined with logging
 # learn the parameters of lynx, very useful
+# more metadata from rss
+# extract new urls and feeds from page
+
 
 ##############################################
 # helper
@@ -73,14 +74,12 @@ def kill_lynx(pid):
 ##############################################
 
 class Crawler:
-    def __init__(self, data_dir = 'data', db = 'crawler'):
+    def __init__(self, db = 'crawler', num_thread = 20):
         self.connect_db(db)
-        self.data_dir = data_dir
         self.feed_queue = Queue()
         self.url_queue = Queue()
-        if not os.path.exists(data_dir):
-            os.makedirs(data_dir)
-        self.count = len(os.listdir(data_dir)) + 1
+        self.num_thread = num_thread
+
 
     def connect_db(self, db):
         client = MongoClient()
@@ -89,13 +88,34 @@ class Crawler:
         self.urls = client[db]['urls']
         self.texts = client[db]['texts']
 
+
+    def init_feed_statistics(self, feed):
+        self.feeds.insert_one({'feed': feed, 'success': 0, 'fail': 0})
+
+    def log_url(self, url, success = True):
+        print success, url
+        self.urls.insert_one({'url': url, 'success': success})
+
+    def log_feed(self, feed, success = True):
+        if success:
+            self.feeds.update({'feed': feed}, {'$inc': {'success': 1}})
+        else:
+            self.feeds.update({'feed': feed}, {'$inc': {'fail': 1}})            
+
+    # NEEDS IMPROVEMENT!!!
+    # SOFT BAN
     def ban(self, url):
         site = urlparse(url).netloc
         self.blacklist.insert_one({'site': site})
 
     def is_valid(self, url):
+        """
+        check if the url is already processed or the site is banned
+        """
         try:
             site = urlparse(url).netloc
+            if not site:
+                return False
             if self.blacklist.find_one({'site': site}):
                 return False
             if self.urls.find_one({'url': url}):
@@ -104,79 +124,82 @@ class Crawler:
         except:
             return False
 
-
     def read_feeds(self, feeds_file):
         """
         read the initial feeds from the file
-        put them into the feed_queue
-        for robustness, retrieve feed from db again
+        save them into db
         """
         for line in open(feeds_file):
             feed = line.strip()
             if feed and not self.feeds.find_one({'feed': feed}):
-                self.feeds.insert_one({'feed': feed, 'success': 0, 'fail': 0})
+                self.init_feed_statistics(feed)
 
 
-
-    def process_queue(self):
+    def get_plain_text(self, url, feed, entry):
         """
-        get urls of the feeds from feed_queue, put into url_queue
-        process the urls from url_queue, add new urls and feads into corresponding queue
-        update the success and fail count of the feed
+        get plain text from a given url by stacking two tools:
+        1. get summary of the web page using readability
+        2. get plain text from the html using lynx
         """
-        for entry in self.feeds.find():
-            self.feed_queue.put(entry['feed'])
-        while not self.feed_queue.empty():
-            feed = self.feed_queue.get()
-            print feed
-            urls = self.get_urls_and_titles(feed)            
-            if urls:
-                self.feeds.update({'feed': feed}, {'$inc': {'success': 1}})
-                for (url, title) in urls:
-                    self.url_queue.put((url, title))
-
-                while not self.url_queue.empty():
-                    url, title = self.url_queue.get()
-                    print url
-                    if self.is_valid(url):
-                        filename = '%d.txt' % self.count
-                        path = os.path.join(self.data_dir, filename)
-                        flag, new_feeds, new_urls = self.get_plain_text(url, path)
-                        if flag == 0:
-                            self.urls.insert_one({'url': url, 'success': True})
-                            self.texts.insert_one({'file': filename,\
-                                                   'title': title,\
-                                                   'url': url,\
-                                                   'feed': feed,\
-                                                   'date': str(date.today())})
-                            self.count += 1
-                            for new_feed in new_feeds:
-                                self.feed_queue.put(new_feed)
-                            for new_url in new_urls:
-                                self.url_queue.put(new_url)
-
-                        else:
-                            self.urls.insert_one({'url': url, 'success': False})
-                            self.ban(url)
-
-            else:
-                self.feeds.update({'feed': feed}, {'$inc': {'fail': 1}})
-
-
-    def get_urls_and_titles(self, feed):
-        urls = []
+        min_length = 500
+        max_length = 50000
         try:
-            with timeout(3, exception=RuntimeError):
-                feed = feedparser.parse(feed)
-                if feed.status == 200:
-                    for entry in feed.entries:
-                        # TODO: check if all RSS have .link, or something else 
-                        link = entry.link
-                        title = entry.title
-                        urls.append((link, title))
+            # with timeout(4, exception=RuntimeError):
+            # suppose readability will not run forever, or we are in trouble
+            title = entry.get('title')
+            html = urllib.urlopen(url).read() # unknown encoding, readability will guess
+            article = Document(html).summary() # unicode
+            article = sub_ms_chars(article).encode('utf-8', 'ignore') # utf-8
+            cmd = "lynx -dump -nolist -notitle -stdin" # play with other parameters
+            lynx = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stdin=subprocess.PIPE)
+            t = threading.Timer(2, kill_lynx, args=[lynx.pid])
+            t.start()
+            text = lynx.communicate(input=article)[0] # utf-8, contains unknown character "?"
+            # text = clean_lynx(text) # utf-8
+            t.cancel()
+            # length within boundary
+            if min_length < len(text) < max_length:
+                self.texts.insert_one({'title': title,\
+                                       'text': bson.Binary(text),\
+                                       'html': bson.Binary(article),\
+                                       'url': url,\
+                                       'feed': feed,\
+                                       'date': str(date.today())}) # label, etc.
+                return True
+            else:
+                return False
         except:
-            pass
-        return urls
+            # too strict?
+            # try a soft ban: if 10 articles from the same site fails then ban the site
+            # self.ban(url)
+            print 'ban!'
+            return False
+
+    def process_url(self):
+        """
+        multi-threading worker function
+        process a single url
+        """
+        while True:
+            feed, entry = self.url_queue.get()
+            url = entry.get('link')
+            if self.is_valid(url):
+                # make sure no runtime error here
+                success = self.get_plain_text(url, feed, entry)
+                self.log_url(url, success) # only log if url is valid
+            # report task done to queue
+            self.url_queue.task_done()
+
+
+
+    def get_rss_entries(self, feed):
+        try:
+            with timeout(1, exception=RuntimeError):
+                rss = feedparser.parse(feed)
+                if rss.status == 200:
+                    return rss.entries
+        except:
+            return []
 
     def find_feed(self, url):
         return None
@@ -185,40 +208,40 @@ class Crawler:
         return None    
 
 
-    def get_plain_text(self, url, output):
+    def process(self):
         """
-        get plain text from a given url by stacking two tools:
-        1. get summary of the web page using readability
-        2. get plain text from the html using lynx
+        main function:
+        read feeds to be processed into a queue
+        for each feed, process the urls with multi-threading 
+        feeds are sequentially processed, easier to manage
+        TODO: add new feeds and urls from the web page into the queue
         """
-        min_length = 500
-        max_length = 50000        
-        try:
-            with timeout(4, exception=RuntimeError):
-                html = urllib.urlopen(url).read()
-                article = Document(html).summary()
-                article = sub_ms_chars(article)
-                cmd = "lynx -dump -nolist -notitle -stdin"
-                lynx = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stdin=subprocess.PIPE)
-                t = threading.Timer(2, kill_lynx, args=[lynx.pid])
-                t.start()            
-                text = lynx.communicate(input=article.encode('utf-8'))[0]
-                t.cancel()
-                if min_length < len(text) < max_length:
-                    f = open(output, 'w')
-                    f.write(text)
-                    f.close()
-                    return 0, [], [] # success
-                else:
-                    return 1, [], [] # text too short or too long
-        except:
-            return 2, [], []
+        for entry in self.feeds.find():
+            self.feed_queue.put(entry['feed'])
 
- 
+        while not self.feed_queue.empty():
+            feed = self.feed_queue.get()
+            print 'feed',  feed
+            # set up workers
+            for i in range(self.num_thread):
+                worker = threading.Thread(target=self.process_url, args=())
+                worker.setDaemon(True)
+                worker.start()
+
+            entries = self.get_rss_entries(feed)
+            if entries:
+                self.log_feed(feed, True)
+                for entry in entries:
+                    self.url_queue.put((feed, entry))
+            else:
+                self.log_feed(feed, False)
+            self.url_queue.join()
+
+
 
 ##############################################
 if __name__ == '__main__':
     crawler = Crawler()
     crawler.read_feeds('feeds.txt')
-    crawler.process_queue()
+    crawler.process()
 
