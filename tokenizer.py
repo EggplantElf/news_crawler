@@ -7,7 +7,7 @@ from pymongo import MongoClient
 import sys
 
 
-def tokenize(output_file, db = 'test_crawler'):
+def tokenize(output_file, db = 'crawler'):
     client = MongoClient()
     texts = client[db]['texts']
     f = open(output_file, 'w')

@@ -22,10 +22,8 @@ from pymongo import MongoClient
 
 ##############################################
 # TODOS
-# learn the parameters of lynx, very useful
 # more metadata from rss
 # extract new urls and feeds from page
-
 
 ##############################################
 # helper
@@ -104,19 +102,20 @@ class Crawler:
 
     # NEEDS IMPROVEMENT!!!
     # SOFT BAN
-    def ban(self, url):
-        site = urlparse(url).netloc
-        self.blacklist.insert_one({'site': site})
+    def ban(self, url, feed):
+        # site = urlparse(url).netloc
+        # self.blacklist.insert_one({'site': site})
+        self.blacklist.insert_one({'url': url, 'feed': feed})
 
     def is_valid(self, url):
         """
         check if the url is already processed or the site is banned
         """
         try:
-            site = urlparse(url).netloc
-            if not site:
+            if not url:
                 return False
-            if self.blacklist.find_one({'site': site}):
+            # site = urlparse(url).netloc
+            if self.blacklist.find_one({'url': url}):
                 return False
             if self.urls.find_one({'url': url}):
                 return False
@@ -150,7 +149,7 @@ class Crawler:
             html = urllib.urlopen(url).read() # unknown encoding, readability will guess
             article = Document(html).summary() # unicode
             article = sub_ms_chars(article).encode('utf-8', 'ignore') # utf-8
-            cmd = "lynx -dump -nolist -notitle -stdin" # play with other parameters
+            cmd = "lynx -dump -nolist -nomargins -nomore -stdin" # play with other parameters
             lynx = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stdin=subprocess.PIPE)
             t = threading.Timer(2, kill_lynx, args=[lynx.pid])
             t.start()
@@ -171,8 +170,8 @@ class Crawler:
         except:
             # too strict?
             # try a soft ban: if 10 articles from the same site fails then ban the site
-            # self.ban(url)
-            print 'ban!'
+            self.ban(url, feed)
+            # print 'ban!'
             return False
 
     def process_url(self):
@@ -219,14 +218,15 @@ class Crawler:
         for entry in self.feeds.find():
             self.feed_queue.put(entry['feed'])
 
+        # set up workers
+        for i in range(self.num_thread):
+            worker = threading.Thread(target=self.process_url, args=())
+            worker.setDaemon(True)
+            worker.start()
+
         while not self.feed_queue.empty():
             feed = self.feed_queue.get()
             print 'feed',  feed
-            # set up workers
-            for i in range(self.num_thread):
-                worker = threading.Thread(target=self.process_url, args=())
-                worker.setDaemon(True)
-                worker.start()
 
             entries = self.get_rss_entries(feed)
             if entries:
