@@ -23,6 +23,8 @@ from pymongo import MongoClient
 ##############################################
 # TODOS
 # more metadata from rss
+# get all urls from feeds, randomize then process
+# might be more efficient and safe
 # extract new urls and feeds from page
 
 ##############################################
@@ -91,7 +93,6 @@ class Crawler:
         self.feeds.insert_one({'feed': feed, 'success': 0, 'fail': 0})
 
     def log_url(self, url, success = True):
-        print success, url
         self.urls.insert_one({'url': url, 'success': success})
 
     def log_feed(self, feed, success = True):
@@ -158,6 +159,7 @@ class Crawler:
             t.cancel()
             # length within boundary
             if min_length < len(text) < max_length:
+                print title
                 self.texts.insert_one({'title': title,\
                                        'text': bson.Binary(text),\
                                        'html': bson.Binary(article),\
