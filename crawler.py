@@ -90,10 +90,10 @@ class Crawler:
 
 
     def init_feed_statistics(self, feed):
-        self.feeds.insert_one({'feed': feed, 'success': 0, 'fail': 0})
+        self.feeds.insert({'feed': feed, 'success': 0, 'fail': 0})
 
     def log_url(self, url, success = True):
-        self.urls.insert_one({'url': url, 'success': success})
+        self.urls.insert({'url': url, 'success': success})
 
     def log_feed(self, feed, success = True):
         if success:
@@ -105,8 +105,8 @@ class Crawler:
     # SOFT BAN
     def ban(self, url, feed):
         # site = urlparse(url).netloc
-        # self.blacklist.insert_one({'site': site})
-        self.blacklist.insert_one({'url': url, 'feed': feed})
+        # self.blacklist.insert({'site': site})
+        self.blacklist.insert({'url': url, 'feed': feed})
 
     def is_valid(self, url):
         """
@@ -160,7 +160,7 @@ class Crawler:
             # length within boundary
             if min_length < len(text) < max_length:
                 print title
-                self.texts.insert_one({'title': title,\
+                self.texts.insert({'title': title,\
                                        'text': bson.Binary(text),\
                                        'html': bson.Binary(article),\
                                        'url': url,\
