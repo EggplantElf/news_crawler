@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 
 import urllib
+import pycurl
+from cStringIO import StringIO
 import os
 import subprocess
 import threading
@@ -70,6 +72,28 @@ def kill_lynx(pid):
     os.kill(pid, signal.SIGKILL)
     os.waitpid(-1, os.WNOHANG)
     print("lynx killed")
+
+def load_url (url, user_agent=None):
+    """
+    Attempt to load the url using pycurl and return the data (which is None if unsuccessful)
+    As a substitution for urllib, since some websites will fail
+    """
+
+    databuffer = StringIO()
+    curl = pycurl.Curl()
+    curl.setopt(pycurl.URL, url)
+    curl.setopt(pycurl.FOLLOWLOCATION, 1)
+    curl.setopt(pycurl.WRITEFUNCTION, databuffer.write)
+    if user_agent:
+        curl.setopt(pycurl.USERAGENT, user_agent)
+    try:
+        curl.perform()
+        data = databuffer.getvalue()
+    except:
+        data = None
+    curl.close()
+
+    return data
 
 ##############################################
 
@@ -147,7 +171,8 @@ class Crawler:
             # with timeout(4, exception=RuntimeError):
             # suppose readability will not run forever, or we are in trouble
             title = entry.get('title')
-            html = urllib.urlopen(url).read() # unknown encoding, readability will guess
+            # html = urllib.urlopen(url).read() # unknown encoding, readability will guess
+            html = load_url(url)
             article = Document(html).summary() # unicode
             article = sub_ms_chars(article).encode('utf-8', 'ignore') # utf-8
             cmd = "lynx -dump -nolist -nomargins -nomore -stdin" # play with other parameters
@@ -240,10 +265,30 @@ class Crawler:
             self.url_queue.join()
 
 
+##############################################
+# test only
+
+def test(url):
+    user_agent = ("Mozilla/5.0 (X11; Linux x86_64) "
+                               "AppleWebKit/537.36 (KHTML, like Gecko) "
+                               "Chrome/32.0.1700.123 Safari/537.36")
+    html = load_url(url, user_agent)
+    article = Document(html).summary() # unicode
+    article = sub_ms_chars(article).encode('utf-8', 'ignore') # utf-8
+    cmd = "lynx -dump -nolist -nomargins -nomore -stdin" # play with other parameters
+    lynx = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stdin=subprocess.PIPE)
+    t = threading.Timer(2, kill_lynx, args=[lynx.pid])
+    t.start()
+    text = lynx.communicate(input=article)[0] # utf-8, contains unknown character "?"
+    t.cancel()
+    print text
+
+
+
 
 ##############################################
 if __name__ == '__main__':
     crawler = Crawler()
-    crawler.read_feeds('feeds.txt')
+    # crawler.read_feeds('feeds.txt')
     crawler.process()
-
+    # test(sys.argv[1])
