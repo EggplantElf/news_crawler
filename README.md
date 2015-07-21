@@ -1,5 +1,5 @@
 # news_crawler
-news crawler from rss feeds
+news crawler from only rss feeds, urls in the news are not considered, might change later
 
 # dependencies
 to run the crawler, you probably need to install some packages, available in pip:
@@ -18,10 +18,12 @@ also the command line tool [lynx] is used
 ```sh
 $ mongod --dbpath [DATABASE-PATH]
 ```
-* run the crawler
+* run the crawler, or use -h for help
 ```sh
 $ python crawler.py -t [NUM-OF-THREADS] -d [DATABASE-NAME] -f [FEEDS-FILE]
 ```
+* you can use any schedule tool to run the crawler only once or twice a day, since rss are not updating that fast.
+
 
 #License
 free to use under own risk, the author is cowardly not responsible for any unpleasant consequences.
