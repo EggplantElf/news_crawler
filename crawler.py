@@ -18,6 +18,7 @@ from readability.readability import Document
 from datetime import date
 
 import bson
+import argparse
 
 from Queue import Queue
 from pymongo import MongoClient
@@ -78,21 +79,22 @@ def load_url (url, user_agent=None):
     Attempt to load the url using pycurl and return the data (which is None if unsuccessful)
     As a substitution for urllib, since some websites will fail
     """
-
-    databuffer = StringIO()
-    curl = pycurl.Curl()
-    curl.setopt(pycurl.URL, url)
-    curl.setopt(pycurl.FOLLOWLOCATION, 1)
-    curl.setopt(pycurl.WRITEFUNCTION, databuffer.write)
-    if user_agent:
-        curl.setopt(pycurl.USERAGENT, user_agent)
     try:
-        curl.perform()
-        data = databuffer.getvalue()
-    except:
-        data = None
-    curl.close()
+        with timeout(5, exception=RuntimeError):
+            databuffer = StringIO()
+            curl = pycurl.Curl()
+            curl.setopt(pycurl.URL, url)
+            curl.setopt(pycurl.FOLLOWLOCATION, 1)
+            curl.setopt(pycurl.WRITEFUNCTION, databuffer.write)
+            if user_agent:
+                curl.setopt(pycurl.USERAGENT, user_agent)
 
+            curl.perform()
+            data = databuffer.getvalue()
+            curl.close()
+    except:
+        print 'timeout load_url'
+        data = None
     return data
 
 ##############################################
@@ -171,32 +173,33 @@ class Crawler:
             # with timeout(4, exception=RuntimeError):
             # suppose readability will not run forever, or we are in trouble
             title = entry.get('title')
-            # html = urllib.urlopen(url).read() # unknown encoding, readability will guess
-            html = load_url(url)
-            article = Document(html).summary() # unicode
-            article = sub_ms_chars(article).encode('utf-8', 'ignore') # utf-8
-            cmd = "lynx -dump -nolist -nomargins -nomore -stdin" # play with other parameters
-            lynx = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stdin=subprocess.PIPE)
-            t = threading.Timer(2, kill_lynx, args=[lynx.pid])
-            t.start()
-            text = lynx.communicate(input=article)[0] # utf-8, contains unknown character "?"
-            # text = clean_lynx(text) # utf-8
-            t.cancel()
-            # length within boundary
-            if min_length < len(text) < max_length:
-                print title
-                self.texts.insert({'title': title,\
-                                       'text': bson.Binary(text),\
-                                       'html': bson.Binary(article),\
-                                       'url': url,\
-                                       'feed': feed,\
-                                       'date': str(date.today())}) # label, etc.
-                return True
-            else:
-                return False
+            html = urllib.urlopen(url).read() # unknown encoding, readability will guess
+            # html = load_url(url) # use pycurl, also unstable
+            if html:
+                article = Document(html).summary() # unicode
+                article = sub_ms_chars(article).encode('utf-8', 'ignore') # utf-8
+                cmd = "lynx -dump -nolist -nomargins -nomore -stdin" # play with other parameters
+                lynx = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stdin=subprocess.PIPE)
+                t = threading.Timer(2, kill_lynx, args=[lynx.pid])
+                t.start()
+                text = lynx.communicate(input=article)[0] # utf-8, contains unknown character "?"
+                # text = clean_lynx(text) # utf-8
+                t.cancel()
+                # length within boundary
+                if min_length < len(text) < max_length:
+                    print title
+                    self.texts.insert({'title': title,\
+                                           'text': bson.Binary(text),\
+                                           'html': bson.Binary(article),\
+                                           'url': url,\
+                                           'feed': feed,\
+                                           'date': str(date.today())}) # label, etc.
+                    return True
+            return False
         except:
             # too strict?
             # try a soft ban: if 10 articles from the same site fails then ban the site
+            print 'time out'
             self.ban(url, feed)
             # print 'ban!'
             return False
@@ -288,7 +291,23 @@ def test(url):
 
 ##############################################
 if __name__ == '__main__':
-    crawler = Crawler()
-    # crawler.read_feeds('feeds.txt')
+    parser = argparse.ArgumentParser(description='Crawler parameters')
+
+    parser.add_argument('-d', action='store', dest='db_name',
+                        default='crawler',
+                        help='database name, default = \'crawler\'')
+
+    parser.add_argument('-t', action='store', default=20,
+                        dest='num_thread', type=int,
+                        help='number of threads during crawling, default = 20')
+
+    parser.add_argument('-f', action='store', default='',
+                        dest='feeds_file',
+                        help='feeds file, only need once, will be saved in DB later')
+
+    param = parser.parse_args()
+
+    crawler = Crawler(param.db_name, param.num_thread)
+    if param.feeds_file:
+        crawler.read_feeds(param.feeds_file)
     crawler.process()
-    # test(sys.argv[1])
