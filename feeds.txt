@@ -71,8 +71,6 @@ http://feeds.abcnews.com/abcnews/internationalheadlines
 http://feeds.abcnews.com/abcnews/entertainmentheadlines
 http://feeds.abcnews.com/abcnews/sportsheadlines
 http://feeds.abcnews.com/abcnews/mostreadstories
-http://feeds.abcnews.com/abcnews/mostviewedvideos
-http://feeds.abcnews.com/abcnews/mostviewedslideshows
 http://www.cbsnews.com/latest/rss/48-hours
 http://www.cbsnews.com/latest/rss/main
 http://www.cbsnews.com/latest/rss/us
