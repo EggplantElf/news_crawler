@@ -16,11 +16,11 @@ also the command line tool [lynx] is used
 * in the file "feeds.txt" are some news feeds, you can add more feeds
 * start the MongoDB deamon (@IMS people: please kindly ask Edgar to update MongoDB in the servers, the version is tooooo old)
 ```sh
-$ mongod --dbpath [your-mongoDB-path]
+$ mongod --dbpath [DATABASE-PATH]
 ```
 * run the crawler
 ```sh
-$ python crawler.py -t [num-of-threads] -d [database-name] -
+$ python crawler.py -t [NUM-OF-THREADS] -d [DATABASE-NAME] -f [FEEDS-FILE]
 ```
 
 #License
