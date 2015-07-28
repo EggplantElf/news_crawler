@@ -1,0 +1,1 @@
+nohup python crawler.py &
